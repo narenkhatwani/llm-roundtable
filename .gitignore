@@ -37,7 +37,7 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Project outputs
-outputs/
+#outputs/
 
 # OS / IDE
 .DS_Store
