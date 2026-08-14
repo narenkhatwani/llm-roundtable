@@ -1,17 +1,19 @@
 """
 LLM Roundtable HTTP API for local n8n (no Streamlit).
 
-Default: 5 author models + 1 merger. Human-framed critique/refine prompts.
+Default: 4 author models + 1 merger/judge (Opus). Human-framed critique/refine prompts.
+Also supports LLM-as-a-judge: after refine, a judge picks the best revised version per author (no merge).
 
   export OPENROUTER_API_KEY=sk-or-...
   python n8n_server.py
 
   GET  /health
-  POST /v1/runs              body: { "prompt": "...", "models"?: [...], "merger_model"?: "..." }
+  POST /v1/runs              body: { "prompt": "...", "models"?: [...], "merger_model"?: "...", "judge_model"?: "..." }
   POST /v1/runs/{id}/primary
   POST /v1/runs/{id}/critiques
   POST /v1/runs/{id}/refine
   POST /v1/runs/{id}/merge
+  POST /v1/runs/{id}/judge
   GET  /v1/runs/{id}
   GET  /v1/runs/{id}/summary
 """
@@ -39,16 +41,60 @@ TFIDF_MAX_FEATURES = 4096
 OUTPUT_DIR = Path("outputs/n8n")
 
 DEFAULT_MODELS = [
-    "openai/gpt-5.4",
-    "anthropic/claude-opus-4.6",
-    "google/gemini-2.5-pro",
-    "deepseek/deepseek-r1",
-    "mistralai/mistral-large-2411",
+    "openai/gpt-5.6-sol",
+    "moonshotai/kimi-k3",
+    "qwen/qwen3.7-max",
+    "google/gemini-3.1-pro-preview",
 ]
-DEFAULT_MERGER = "openai/gpt-5.4"
+DEFAULT_MERGER = "anthropic/claude-opus-4.8"
+DEFAULT_JUDGE = "anthropic/claude-opus-4.8"
 DEFAULT_TEMPERATURE = 0.5
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_MAX_TOKENS = 8192
+
+# Per-model OpenRouter / provider extras for "high" reasoning effort.
+DEFAULT_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
+    "anthropic/claude-opus-4.8": {
+        "thinking": {"type": "enabled", "budget_tokens": 32000},
+        "output_config": {"effort": "high"},
+    },
+    "openai/gpt-5.6-sol": {
+        "reasoning": {"effort": "high"},
+    },
+    "moonshotai/kimi-k3": {
+        "reasoning_effort": "high",
+    },
+    "qwen/qwen3.7-max": {
+        "enable_thinking": True,
+        "thinking_budget": 32768,
+    },
+    "google/gemini-3.1-pro-preview": {
+        "thinking_level": "high",
+    },
+}
+
+JUDGE_TEMPLATE = """You are an expert bioinformaticist in the domain of biomedical ontologies. Several revised answers to the same prompt were produced by one system after it incorporated several independent critiques by experts. Your job is to decide which single revised answer is the best response to the original prompt.
+
+The author was originally asked:
+ORIGINAL PROMPT: {prompt}
+The author then produced the following revised versions, each incorporating a different critique:
+REVISED VERSIONS: {revised_versions}
+
+Select exactly one version. Do not merge, combine, rewrite, correct or extend the versions, and do not combine or create a new answer from parts of several versions.
+
+Evaluate each version strictly against the requirements stated in the original prompt. Use the following criteria:
+Is the formula well-defined and consistent (e.g., factors combine in a way that is quantifiable and produces a score)?
+Do the factors target distinct aspects of utility based on the target ontology’s content, without overlapping or duplicating one another?
+For each factor, does the version clearly address all four required elements: what it measures, why it matters, how it influences the score, and what assumptions it relies on?
+Are excluded factors and assumptions specifically stated?
+Does the version follow the required output format?
+
+Do not reward a version for its length, for listing more factors, for hedging, or for appearing more confident. Do not consider which critique prompted which version.
+
+Return your answer in the following format:
+Selected version (label given in REVISED VERSIONS)
+A concise rationale (2-3 sentences) on why this version was chosen
+"""
 
 CRITIQUE_TEMPLATE = """You are an experienced critic in the domain of biomedical ontologies evaluating someone else's answer.
 
@@ -119,15 +165,23 @@ def chat_complete(
     messages: list[dict[str, str]],
     temperature: float,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    extra: Optional[dict[str, Any]] = None,
 ) -> str:
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if extra:
+        # Provider-specific / OpenRouter reasoning knobs (thinking, reasoning, etc.)
+        kwargs["extra_body"] = extra
+    resp = client.chat.completions.create(**kwargs)
     return (resp.choices[0].message.content or "").strip()
 
+
+def model_extra(run: "RunState", model: str) -> dict[str, Any]:
+    return dict(run.model_configs.get(model) or {})
 
 def tfidf_cosine(a: str, b: str) -> float:
     if not a.strip() or not b.strip():
@@ -150,12 +204,19 @@ def estimate_api_calls(n: int) -> int:
     return n + n * (n - 1) + n * (n - 1) + n
 
 
+def estimate_judge_api_calls(n: int) -> int:
+    """Primary + critiques + refine + one judge call per author (replaces merge)."""
+    return n + n * (n - 1) + n * (n - 1) + n
+
+
 @dataclass
 class RunState:
     run_id: str
     prompt: str
     models: list[str]
     merger_model: str
+    judge_model: str = DEFAULT_JUDGE
+    model_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
     temperature: float = DEFAULT_TEMPERATURE
     max_workers: int = DEFAULT_MAX_WORKERS
     phase: str = "created"
@@ -163,6 +224,7 @@ class RunState:
     critiques: list[list[str | None]] = field(default_factory=list)
     refined: list[list[str | None]] = field(default_factory=list)
     merged: list[str | None] = field(default_factory=list)
+    judgments: list[str | None] = field(default_factory=list)
     cosines: list[float] = field(default_factory=list)
     error: str | None = None
     created_at: str = field(
@@ -177,6 +239,8 @@ class CreateRunBody(BaseModel):
     prompt: str = Field(..., min_length=1)
     models: Optional[List[str]] = None
     merger_model: Optional[str] = None
+    judge_model: Optional[str] = None
+    model_configs: Optional[dict[str, dict[str, Any]]] = None
     temperature: Optional[float] = None
     max_workers: Optional[int] = None
 
@@ -203,11 +267,13 @@ def run_primary(client: OpenAI, run: RunState) -> None:
     out: list[str | None] = [None] * n
 
     def one(i: int) -> tuple[int, str]:
+        model = run.models[i]
         text = chat_complete(
             client,
-            run.models[i],
+            model,
             [{"role": "user", "content": run.prompt}],
             run.temperature,
+            extra=model_extra(run, model),
         )
         return i, text
 
@@ -226,15 +292,17 @@ def run_critiques(client: OpenAI, run: RunState) -> None:
     tasks = [(i, j) for i in range(n) for j in range(n) if j != i]
 
     def work(i: int, j: int) -> tuple[int, int, str]:
+        model = run.models[j]
         msg = CRITIQUE_TEMPLATE.format(
             prompt=run.prompt,
             response_to_evaluate=run.primary[i] or "",
         )
         text = chat_complete(
             client,
-            run.models[j],
+            model,
             [{"role": "user", "content": msg}],
             run.temperature,
+            extra=model_extra(run, model),
         )
         return i, j, text
 
@@ -253,6 +321,7 @@ def run_refine(client: OpenAI, run: RunState) -> None:
     tasks = [(i, j) for i in range(n) for j in range(n) if j != i]
 
     def work(i: int, j: int) -> tuple[int, int, str]:
+        model = run.models[i]
         msg = REFINEMENT_TEMPLATE.format(
             prompt=run.prompt,
             original_response=run.primary[i] or "",
@@ -260,9 +329,10 @@ def run_refine(client: OpenAI, run: RunState) -> None:
         )
         text = chat_complete(
             client,
-            run.models[i],
+            model,
             [{"role": "user", "content": msg}],
             run.temperature,
+            extra=model_extra(run, model),
         )
         return i, j, text
 
@@ -303,6 +373,7 @@ def run_merge(client: OpenAI, run: RunState) -> None:
             run.merger_model,
             [{"role": "user", "content": msg}],
             run.temperature,
+            extra=model_extra(run, run.merger_model),
         )
     run.merged = merged
     run.cosines = [
@@ -312,7 +383,43 @@ def run_merge(client: OpenAI, run: RunState) -> None:
     _save_run(run)
 
 
-def _save_run(run: RunState) -> Path:
+def run_judge(client: OpenAI, run: RunState) -> None:
+    """Per author: judge selects the best of that author's refined versions."""
+    n = len(run.models)
+    judgments: list[str | None] = [None] * n
+    for i in range(n):
+        blocks: list[str] = []
+        for j in range(n):
+            if j == i:
+                continue
+            t = run.refined[i][j]
+            if t:
+                blocks.append(
+                    MERGE_VERSION_BLOCK_TEMPLATE.format(
+                        critic_label=f"LLM-{j + 1} ({run.models[j]})",
+                        text=t,
+                    )
+                )
+        if not blocks:
+            judgments[i] = None
+            continue
+        msg = JUDGE_TEMPLATE.format(
+            prompt=run.prompt,
+            revised_versions="\n".join(blocks),
+        )
+        judgments[i] = chat_complete(
+            client,
+            run.judge_model,
+            [{"role": "user", "content": msg}],
+            run.temperature,
+            extra=model_extra(run, run.judge_model),
+        )
+    run.judgments = judgments
+    run.phase = "judged"
+    _save_run(run, filename="judge_run.json")
+
+
+def _save_run(run: RunState, filename: str = "roundtable_run.json") -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     run_dir = OUTPUT_DIR / run.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -322,15 +429,18 @@ def _save_run(run: RunState) -> Path:
         "phase": run.phase,
         "models": run.models,
         "merger_model": run.merger_model,
+        "judge_model": run.judge_model,
+        "model_configs": run.model_configs,
         "temperature": run.temperature,
         "primary_prompt": run.prompt,
         "primary_responses": run.primary,
         "critiques": run.critiques,
         "refined_responses": run.refined,
         "merged_responses": run.merged,
+        "judgments": run.judgments,
         "tfidf_cosine_primary_vs_merged": run.cosines,
     }
-    path = run_dir / "roundtable_run.json"
+    path = run_dir / filename
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return run_dir
 
@@ -339,6 +449,7 @@ def build_summary(run: RunState) -> dict[str, Any]:
     rows = []
     for i, model in enumerate(run.models):
         sim = run.cosines[i] if i < len(run.cosines) else None
+        judgment = run.judgments[i] if i < len(run.judgments) else None
         rows.append(
             {
                 "author_index": i + 1,
@@ -346,37 +457,57 @@ def build_summary(run: RunState) -> dict[str, Any]:
                 "tfidf_cosine_primary_vs_merged": sim,
                 "primary_preview": ((run.primary[i] or "")[:400] if run.primary else ""),
                 "merged_preview": ((run.merged[i] or "")[:400] if run.merged else ""),
+                "judgment_preview": ((judgment or "")[:400] if judgment else ""),
                 "primary": run.primary[i] if run.primary else None,
                 "merged": run.merged[i] if run.merged else None,
+                "judgment": judgment,
             }
         )
 
-    lines = [
-        f"# Roundtable run `{run.run_id}`",
-        f"- Phase: **{run.phase}**",
-        f"- Authors: {len(run.models)} | Merger: `{run.merger_model}`",
-        f"- Estimated API calls: {estimate_api_calls(len(run.models))}",
-        "",
-        "## TF-IDF cosine (primary vs merged)",
-        "",
-    ]
-    for row in rows:
-        sim = row["tfidf_cosine_primary_vs_merged"]
-        sim_s = f"{sim:.4f}" if isinstance(sim, float) else "n/a"
-        lines.append(f"- **LLM {row['author_index']}** `{row['model']}`: {sim_s}")
+    if run.phase == "judged":
+        lines = [
+            f"# LLM-as-judge run `{run.run_id}`",
+            f"- Phase: **{run.phase}**",
+            f"- Authors: {len(run.models)} | Judge: `{run.judge_model}`",
+            f"- Estimated API calls: {estimate_judge_api_calls(len(run.models))}",
+            "",
+            "## Judgments",
+            "",
+        ]
+        for row in rows:
+            lines.append(f"### LLM {row['author_index']} — `{row['model']}`")
+            lines.append(row["judgment"] or "_empty_")
+            lines.append("")
+        api_calls = estimate_judge_api_calls(len(run.models))
+    else:
+        lines = [
+            f"# Roundtable run `{run.run_id}`",
+            f"- Phase: **{run.phase}**",
+            f"- Authors: {len(run.models)} | Merger: `{run.merger_model}`",
+            f"- Estimated API calls: {estimate_api_calls(len(run.models))}",
+            "",
+            "## TF-IDF cosine (primary vs merged)",
+            "",
+        ]
+        for row in rows:
+            sim = row["tfidf_cosine_primary_vs_merged"]
+            sim_s = f"{sim:.4f}" if isinstance(sim, float) else "n/a"
+            lines.append(f"- **LLM {row['author_index']}** `{row['model']}`: {sim_s}")
 
-    lines.extend(["", "## Merged answers", ""])
-    for row in rows:
-        lines.append(f"### LLM {row['author_index']} — `{row['model']}`")
-        lines.append(row["merged"] or "_empty_")
-        lines.append("")
+        lines.extend(["", "## Merged answers", ""])
+        for row in rows:
+            lines.append(f"### LLM {row['author_index']} — `{row['model']}`")
+            lines.append(row["merged"] or "_empty_")
+            lines.append("")
+        api_calls = estimate_api_calls(len(run.models))
 
     return {
         "run_id": run.run_id,
         "phase": run.phase,
         "models": run.models,
         "merger_model": run.merger_model,
-        "api_calls": estimate_api_calls(len(run.models)),
+        "judge_model": run.judge_model,
+        "api_calls": api_calls,
         "authors": rows,
         "markdown": "\n".join(lines),
         "output_dir": str((OUTPUT_DIR / run.run_id).resolve()),
@@ -394,7 +525,9 @@ def health() -> dict[str, Any]:
         "openrouter_key_set": key_set,
         "default_models": DEFAULT_MODELS,
         "default_merger": DEFAULT_MERGER,
+        "default_judge": DEFAULT_JUDGE,
         "api_calls_for_defaults": estimate_api_calls(len(DEFAULT_MODELS)),
+        "judge_api_calls_for_defaults": estimate_judge_api_calls(len(DEFAULT_MODELS)),
     }
 
 
@@ -402,18 +535,25 @@ def health() -> dict[str, Any]:
 def create_run(body: CreateRunBody) -> dict[str, Any]:
     require_api_key()
     models = body.models or list(DEFAULT_MODELS)
-    if len(models) != 5:
+    if len(models) != 4:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected exactly 5 author models, got {len(models)}",
+            detail=f"Expected exactly 4 author models, got {len(models)}",
         )
     merger = (body.merger_model or DEFAULT_MERGER).strip()
+    judge = (body.judge_model or DEFAULT_JUDGE).strip()
+    configs = dict(DEFAULT_MODEL_CONFIGS)
+    if body.model_configs:
+        for key, val in body.model_configs.items():
+            configs[key.strip()] = dict(val or {})
     run_id = uuid.uuid4().hex[:8]
     run = RunState(
         run_id=run_id,
         prompt=body.prompt.strip(),
         models=[m.strip() for m in models],
         merger_model=merger,
+        judge_model=judge,
+        model_configs=configs,
         temperature=body.temperature if body.temperature is not None else DEFAULT_TEMPERATURE,
         max_workers=body.max_workers if body.max_workers is not None else DEFAULT_MAX_WORKERS,
     )
@@ -423,7 +563,10 @@ def create_run(body: CreateRunBody) -> dict[str, Any]:
         "phase": run.phase,
         "models": run.models,
         "merger_model": run.merger_model,
+        "judge_model": run.judge_model,
+        "model_configs": run.model_configs,
         "api_calls": estimate_api_calls(len(run.models)),
+        "judge_api_calls": estimate_judge_api_calls(len(run.models)),
         "created_at": run.created_at,
     }
 
@@ -500,6 +643,21 @@ def phase_merge(run_id: str) -> dict[str, Any]:
     return build_summary(run)
 
 
+@app.post("/v1/runs/{run_id}/judge")
+def phase_judge(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    if run.phase not in {"refine", "judged"}:
+        raise HTTPException(status_code=400, detail=f"Need refine first (phase={run.phase})")
+    client = get_client(require_api_key())
+    try:
+        run_judge(client, run)
+    except Exception as e:
+        run.error = str(e)
+        run.phase = "error"
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return build_summary(run)
+
+
 @app.get("/v1/runs/{run_id}")
 def get_run_state(run_id: str) -> dict[str, Any]:
     run = get_run(run_id)
@@ -508,11 +666,13 @@ def get_run_state(run_id: str) -> dict[str, Any]:
         "phase": run.phase,
         "models": run.models,
         "merger_model": run.merger_model,
+        "judge_model": run.judge_model,
         "error": run.error,
         "has_primary": bool(run.primary),
         "has_critiques": bool(run.critiques),
         "has_refined": bool(run.refined),
         "has_merged": bool(run.merged),
+        "has_judgments": bool(run.judgments),
         "cosines": run.cosines,
     }
 
@@ -520,7 +680,7 @@ def get_run_state(run_id: str) -> dict[str, Any]:
 @app.get("/v1/runs/{run_id}/summary")
 def get_summary(run_id: str) -> dict[str, Any]:
     run = get_run(run_id)
-    if run.phase != "merged":
+    if run.phase not in {"merged", "judged"}:
         raise HTTPException(status_code=400, detail=f"Run not finished (phase={run.phase})")
     return build_summary(run)
 
@@ -531,6 +691,7 @@ if __name__ == "__main__":
     print(
         f"Roundtable API on http://127.0.0.1:8787  "
         f"({len(DEFAULT_MODELS)} authors + merger, "
-        f"~{estimate_api_calls(len(DEFAULT_MODELS))} LLM calls/run)"
+        f"~{estimate_api_calls(len(DEFAULT_MODELS))} LLM calls/run; "
+        f"judge mode ~{estimate_judge_api_calls(len(DEFAULT_MODELS))} calls/run)"
     )
     uvicorn.run(app, host="127.0.0.1", port=8787, log_level="info")

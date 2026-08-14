@@ -1,5 +1,5 @@
 {
-  "name": "LLM Roundtable (4 + merger)",
+  "name": "LLM as a Judge (4 + judge)",
   "meta": {
     "templateCredsSetupCompleted": true
   },
@@ -38,8 +38,8 @@
               "type": "object"
             },
             {
-              "id": "merger",
-              "name": "merger_model",
+              "id": "judge",
+              "name": "judge_model",
               "value": "anthropic/claude-opus-4.8",
               "type": "string"
             }
@@ -48,7 +48,7 @@
         "options": {}
       },
       "id": "set-config",
-      "name": "Config (4 authors + merger)",
+      "name": "Config (4 authors + judge)",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [240, 300]
@@ -59,7 +59,7 @@
         "url": "http://127.0.0.1:8787/v1/runs",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"models\": {{ JSON.stringify($json.models) }},\n  \"merger_model\": {{ JSON.stringify($json.merger_model) }},\n  \"model_configs\": {{ JSON.stringify($json.model_configs) }}\n}",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"models\": {{ JSON.stringify($json.models) }},\n  \"judge_model\": {{ JSON.stringify($json.judge_model) }},\n  \"model_configs\": {{ JSON.stringify($json.model_configs) }}\n}",
         "options": {
           "timeout": 60000
         }
@@ -115,20 +115,20 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://127.0.0.1:8787/v1/runs/{{ $json.run_id }}/merge",
+        "url": "=http://127.0.0.1:8787/v1/runs/{{ $json.run_id }}/judge",
         "options": {
           "timeout": 900000
         }
       },
-      "id": "phase-merge",
-      "name": "5. Merge + cosine",
+      "id": "phase-judge",
+      "name": "5. Judge (pick best)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1440, 300]
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst authors = data.authors || [];\nconst scoreLines = authors.map(a => {\n  const sim = a.tfidf_cosine_primary_vs_merged;\n  const simS = (typeof sim === 'number') ? sim.toFixed(4) : 'n/a';\n  return `- LLM ${a.author_index} (${a.model}): ${simS}`;\n}).join('\\n');\n\nconst mergedBlocks = authors.map(a => {\n  return `### LLM ${a.author_index} — ${a.model}\\n\\n${a.merged || '_empty_'}`;\n}).join('\\n\\n');\n\nconst markdown = [\n  `# Roundtable ${data.run_id}`,\n  `Merger: \\`${data.merger_model}\\` | API calls: ${data.api_calls}`,\n  '',\n  '## Cosine (primary vs merged)',\n  scoreLines,\n  '',\n  '## Merged answers',\n  mergedBlocks,\n  '',\n  `Saved under: ${data.output_dir || ''}`,\n].join('\\n');\n\nreturn [{\n  json: {\n    run_id: data.run_id,\n    phase: data.phase,\n    merger_model: data.merger_model,\n    api_calls: data.api_calls,\n    cosines: authors.map(a => ({\n      model: a.model,\n      cosine: a.tfidf_cosine_primary_vs_merged,\n    })),\n    markdown,\n    output_dir: data.output_dir,\n  }\n}];"
+        "jsCode": "const data = $input.first().json;\nconst authors = data.authors || [];\nconst judgmentBlocks = authors.map(a => {\n  return `### LLM ${a.author_index} — ${a.model}\\n\\n${a.judgment || '_empty_'}`;\n}).join('\\n\\n');\n\nconst markdown = [\n  `# LLM-as-judge ${data.run_id}`,\n  `Judge: \\`${data.judge_model}\\` | API calls: ${data.api_calls}`,\n  '',\n  '## Judge selections',\n  judgmentBlocks,\n  '',\n  `Saved under: ${data.output_dir || ''}`,\n].join('\\n');\n\nreturn [{\n  json: {\n    run_id: data.run_id,\n    phase: data.phase,\n    judge_model: data.judge_model,\n    api_calls: data.api_calls,\n    judgments: authors.map(a => ({\n      model: a.model,\n      judgment: a.judgment,\n    })),\n    markdown,\n    output_dir: data.output_dir,\n  }\n}];"
       },
       "id": "format-summary",
       "name": "Format summary",
@@ -142,14 +142,14 @@
       "main": [
         [
           {
-            "node": "Config (4 authors + merger)",
+            "node": "Config (4 authors + judge)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Config (4 authors + merger)": {
+    "Config (4 authors + judge)": {
       "main": [
         [
           {
@@ -197,14 +197,14 @@
       "main": [
         [
           {
-            "node": "5. Merge + cosine",
+            "node": "5. Judge (pick best)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "5. Merge + cosine": {
+    "5. Judge (pick best)": {
       "main": [
         [
           {
