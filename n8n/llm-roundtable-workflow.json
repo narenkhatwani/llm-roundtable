@@ -34,7 +34,7 @@
             {
               "id": "model_configs",
               "name": "model_configs",
-              "value": "={{({\n  \"anthropic/claude-opus-4.8\": {\n    \"thinking\": {\"type\": \"enabled\", \"budget_tokens\": 32000},\n    \"output_config\": {\"effort\": \"high\"}\n  },\n  \"openai/gpt-5.6-sol\": {\n    \"reasoning\": {\"effort\": \"high\"}\n  },\n  \"moonshotai/kimi-k3\": {\n    \"reasoning_effort\": \"high\"\n  },\n  \"qwen/qwen3.7-max\": {\n    \"enable_thinking\": true,\n    \"thinking_budget\": 32768\n  },\n  \"google/gemini-3.1-pro-preview\": {\n    \"thinking_level\": \"high\"\n  }\n})}}",
+              "value": "={{({\n  \"anthropic/claude-opus-4.8\": {\n    \"thinking\": {\"type\": \"enabled\", \"budget_tokens\": 32000},\n    \"output_config\": {\"effort\": \"high\"},\n    \"max_tokens\": 65536\n  },\n  \"openai/gpt-5.6-sol\": {\n    \"reasoning\": {\"effort\": \"high\"},\n    \"max_tokens\": 65536\n  },\n  \"moonshotai/kimi-k3\": {\n    \"reasoning_effort\": \"high\",\n    \"max_tokens\": 32768,\n    \"omit_temperature\": true\n  },\n  \"qwen/qwen3.7-max\": {\n    \"enable_thinking\": true,\n    \"thinking_budget\": 32768,\n    \"max_tokens\": 65536\n  },\n  \"google/gemini-3.1-pro-preview\": {\n    \"thinking_level\": \"high\",\n    \"max_tokens\": 65536\n  }\n})}}",
               "type": "object"
             },
             {

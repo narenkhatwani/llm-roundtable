@@ -50,28 +50,47 @@ DEFAULT_MERGER = "anthropic/claude-opus-4.8"
 DEFAULT_JUDGE = "anthropic/claude-opus-4.8"
 DEFAULT_TEMPERATURE = 0.5
 DEFAULT_MAX_WORKERS = 8
-DEFAULT_MAX_TOKENS = 8192
+# Reasoning tokens count against this budget. OpenRouter "high" effort uses ~80% of
+# max_tokens for thinking, so 8192 left GPT truncated and Kimi with an empty answer.
+# Must also exceed Claude/Qwen thinking budgets (32k) plus room for the visible answer.
+DEFAULT_MAX_TOKENS = 65536
+OPENROUTER_TIMEOUT_S = 900.0
 
 # Per-model OpenRouter / provider extras for "high" reasoning effort.
+# max_tokens / omit_temperature are consumed by chat_complete, not sent as extra_body.
 DEFAULT_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "anthropic/claude-opus-4.8": {
         "thinking": {"type": "enabled", "budget_tokens": 32000},
         "output_config": {"effort": "high"},
+        "max_tokens": 65536,
     },
     "openai/gpt-5.6-sol": {
         "reasoning": {"effort": "high"},
+        "max_tokens": 65536,
     },
     "moonshotai/kimi-k3": {
         "reasoning_effort": "high",
+        "max_tokens": 32768,
+        "omit_temperature": True,
     },
     "qwen/qwen3.7-max": {
         "enable_thinking": True,
         "thinking_budget": 32768,
+        "max_tokens": 65536,
     },
     "google/gemini-3.1-pro-preview": {
         "thinking_level": "high",
+        "max_tokens": 65536,
     },
 }
+
+# Provider output caps (OpenRouter errors if max_tokens exceeds these).
+MODEL_OUTPUT_CAPS: dict[str, int] = {
+    "moonshotai/kimi-k3": 32768,
+}
+
+# Kimi K3 rejects sampling params; OpenRouter still forwards temperature if set.
+NO_TEMPERATURE_MODELS = frozenset({"moonshotai/kimi-k3"})
 
 JUDGE_TEMPLATE = """You are an expert bioinformaticist in the domain of biomedical ontologies. Several revised answers to the same prompt were produced by one system after it incorporated several independent critiques by experts. Your job is to decide which single revised answer is the best response to the original prompt.
 
@@ -152,11 +171,29 @@ def get_client(api_key: str) -> OpenAI:
     return OpenAI(
         base_url=OPENROUTER_BASE,
         api_key=api_key,
+        timeout=OPENROUTER_TIMEOUT_S,
         default_headers={
             "HTTP-Referer": "https://github.com/narenkhatwani/llm-roundtable",
             "X-Title": "LLM Roundtable n8n",
         },
     )
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+            else:
+                parts.append(str(getattr(part, "text", "") or ""))
+        return "".join(parts).strip()
+    return ""
 
 
 def chat_complete(
@@ -167,17 +204,34 @@ def chat_complete(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     extra: Optional[dict[str, Any]] = None,
 ) -> str:
+    extra_body = dict(extra or {})
+    max_tokens = int(extra_body.pop("max_tokens", max_tokens))
+    omit_temperature = bool(extra_body.pop("omit_temperature", False))
+    cap = MODEL_OUTPUT_CAPS.get(model)
+    if cap:
+        max_tokens = min(max_tokens, cap)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    if extra:
+    if not (omit_temperature or model in NO_TEMPERATURE_MODELS):
+        kwargs["temperature"] = temperature
+    if extra_body:
         # Provider-specific / OpenRouter reasoning knobs (thinking, reasoning, etc.)
-        kwargs["extra_body"] = extra
+        kwargs["extra_body"] = extra_body
     resp = client.chat.completions.create(**kwargs)
-    return (resp.choices[0].message.content or "").strip()
+    choice = resp.choices[0]
+    text = _message_text(choice.message)
+    finish = getattr(choice, "finish_reason", None)
+    if not text:
+        print(f"[chat_complete] {model}: empty content (finish_reason={finish})")
+    elif finish == "length":
+        print(
+            f"[chat_complete] {model}: truncated at max_tokens={max_tokens} "
+            f"({len(text)} chars)"
+        )
+    return text
 
 
 def model_extra(run: "RunState", model: str) -> dict[str, Any]:
