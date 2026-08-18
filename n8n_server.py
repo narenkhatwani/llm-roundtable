@@ -1,7 +1,7 @@
 """
 LLM Roundtable HTTP API for local n8n (no Streamlit).
 
-Default: 4 author models + 1 merger/judge (Opus). Human-framed critique/refine prompts.
+Default: 5 author models + merger (Opus) / judge (Fable 5). Human-framed critique/refine prompts.
 Also supports LLM-as-a-judge: after refine, a judge picks the best revised version per author (no merge).
 
   export OPENROUTER_API_KEY=sk-or-...
@@ -45,9 +45,10 @@ DEFAULT_MODELS = [
     "moonshotai/kimi-k3",
     "qwen/qwen3.7-max",
     "google/gemini-3.1-pro-preview",
+    "anthropic/claude-opus-4.8",
 ]
 DEFAULT_MERGER = "anthropic/claude-opus-4.8"
-DEFAULT_JUDGE = "anthropic/claude-opus-4.8"
+DEFAULT_JUDGE = "anthropic/claude-fable-5"
 DEFAULT_TEMPERATURE = 0.5
 DEFAULT_MAX_WORKERS = 8
 # Reasoning tokens count against this budget. OpenRouter "high" effort uses ~80% of
@@ -82,6 +83,14 @@ DEFAULT_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "thinking_level": "high",
         "max_tokens": 65536,
     },
+    # Fable 5: thinking is always on. budget_tokens / thinking.type=enabled 400.
+    # OpenRouter maps verbosity → Anthropic output_config.effort.
+    "anthropic/claude-fable-5": {
+        "output_config": {"effort": "high"},
+        "verbosity": "high",
+        "max_tokens": 65536,
+        "omit_temperature": True,
+    },
 }
 
 # Provider output caps (OpenRouter errors if max_tokens exceeds these).
@@ -89,8 +98,11 @@ MODEL_OUTPUT_CAPS: dict[str, int] = {
     "moonshotai/kimi-k3": 32768,
 }
 
-# Kimi K3 rejects sampling params; OpenRouter still forwards temperature if set.
-NO_TEMPERATURE_MODELS = frozenset({"moonshotai/kimi-k3"})
+# These models reject sampling params; OpenRouter still forwards temperature if set.
+NO_TEMPERATURE_MODELS = frozenset({
+    "moonshotai/kimi-k3",
+    "anthropic/claude-fable-5",
+})
 
 JUDGE_TEMPLATE = """You are an expert bioinformaticist in the domain of biomedical ontologies. Several revised answers to the same prompt were produced by one system after it incorporated several independent critiques by experts. Your job is to decide which single revised answer is the best response to the original prompt.
 
@@ -218,7 +230,7 @@ def chat_complete(
     if not (omit_temperature or model in NO_TEMPERATURE_MODELS):
         kwargs["temperature"] = temperature
     if extra_body:
-        # Provider-specific / OpenRouter reasoning knobs (thinking, reasoning, etc.)
+        # Provider-specific / OpenRouter reasoning knobs (thinking, reasoning, verbosity, etc.)
         kwargs["extra_body"] = extra_body
     resp = client.chat.completions.create(**kwargs)
     choice = resp.choices[0]
@@ -589,10 +601,10 @@ def health() -> dict[str, Any]:
 def create_run(body: CreateRunBody) -> dict[str, Any]:
     require_api_key()
     models = body.models or list(DEFAULT_MODELS)
-    if len(models) != 4:
+    if len(models) < 2:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected exactly 4 author models, got {len(models)}",
+            detail=f"Need at least 2 author models, got {len(models)}",
         )
     merger = (body.merger_model or DEFAULT_MERGER).strip()
     judge = (body.judge_model or DEFAULT_JUDGE).strip()
