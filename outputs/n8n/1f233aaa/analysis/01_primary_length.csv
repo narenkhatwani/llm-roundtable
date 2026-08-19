@@ -1,0 +1,6 @@
+llm,model,words
+LLM-1,gpt-5.6-sol,2769
+LLM-2,kimi-k3,3111
+LLM-3,qwen3.7-max,1236
+LLM-4,gemini-3.1-pro-preview,1046
+LLM-5,claude-opus-4.8,996
