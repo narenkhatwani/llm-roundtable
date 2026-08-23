@@ -104,11 +104,11 @@ NO_TEMPERATURE_MODELS = frozenset({
     "anthropic/claude-fable-5",
 })
 
-JUDGE_TEMPLATE = """You are an expert bioinformaticist in the domain of biomedical ontologies. Several revised answers to the same prompt were produced by one system after it incorporated several independent critiques by experts. Your job is to decide which single revised answer is the best response to the original prompt.
+JUDGE_TEMPLATE = """You are an expert bioinformaticist in the domain of biomedical ontologies. Several revised answers to the same prompt were produced by one expert after they incorporated several independent critiques. Your job is to decide which single revised answer is the best response to the original prompt.
 
-The author was originally asked:
+The expert was originally asked:
 ORIGINAL PROMPT: {prompt}
-The author then produced the following revised versions, each incorporating a different critique:
+The expert then produced the following revised versions, each incorporating a different critique:
 REVISED VERSIONS: {revised_versions}
 
 Select exactly one version. Do not merge, combine, rewrite, correct or extend the versions, and do not combine or create a new answer from parts of several versions.
@@ -160,11 +160,13 @@ Address each point raised in the critique; if you disagree with a point, say so 
 Maintain the original output requirements (plain-text notation, formula + factors + assumptions).
 """
 
-MERGE_VERSION_BLOCK_TEMPLATE = """### Version after critique from {critic_label}
+# Shown to judge/merger only. Use the 1-based critic slot so analysis can map
+# "Version N" back to a critic. Never put model slugs, "LLM", or critic names here.
+VERSION_BLOCK_TEMPLATE = """### Version {version_number}
 {text}
 """
 
-MERGE_TEMPLATE = """You are a response aggregator. Several revised answers to the same prompt were produced by one author after it incorporated several independent critiques. Your job is to merge them into one definitive answer.
+MERGE_TEMPLATE = """You are a response aggregator. Several revised answers to the same prompt were produced by one author after they incorporated several independent critiques. Your job is to merge them into one definitive answer.
 
 Merge the revised versions below into ONE final answer that is at least as good as any individual version in every aspect. Each version was the same author's attempt to improve the same underlying answer in response to a different critique.
 
@@ -248,6 +250,12 @@ def chat_complete(
 
 def model_extra(run: "RunState", model: str) -> dict[str, Any]:
     return dict(run.model_configs.get(model) or {})
+
+
+def format_revised_version(critic_index: int, text: str) -> str:
+    """Blind version label for prompts sent to models (1-based critic slot)."""
+    return VERSION_BLOCK_TEMPLATE.format(version_number=critic_index + 1, text=text)
+
 
 def tfidf_cosine(a: str, b: str) -> float:
     if not a.strip() or not b.strip():
@@ -421,12 +429,7 @@ def run_merge(client: OpenAI, run: RunState) -> None:
                 continue
             t = run.refined[i][j]
             if t:
-                blocks.append(
-                    MERGE_VERSION_BLOCK_TEMPLATE.format(
-                        critic_label=f"LLM-{j + 1} ({run.models[j]})",
-                        text=t,
-                    )
-                )
+                blocks.append(format_revised_version(j, t))
         if not blocks:
             merged[i] = None
             continue
@@ -460,12 +463,7 @@ def run_judge(client: OpenAI, run: RunState) -> None:
                 continue
             t = run.refined[i][j]
             if t:
-                blocks.append(
-                    MERGE_VERSION_BLOCK_TEMPLATE.format(
-                        critic_label=f"LLM-{j + 1} ({run.models[j]})",
-                        text=t,
-                    )
-                )
+                blocks.append(format_revised_version(j, t))
         if not blocks:
             judgments[i] = None
             continue
