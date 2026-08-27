@@ -1,0 +1,6 @@
+author,author_model,chosen_critic,chosen_critic_model,words
+LLM-1,gpt-5.6-sol,LLM-5,claude-opus-4.8,3310
+LLM-2,kimi-k3,LLM-3,qwen3.7-max,3284
+LLM-3,qwen3.7-max,LLM-1,gpt-5.6-sol,1582
+LLM-4,gemini-3.1-pro-preview,LLM-1,gpt-5.6-sol,1320
+LLM-5,claude-opus-4.8,LLM-1,gpt-5.6-sol,2169
