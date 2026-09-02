@@ -1,0 +1,32 @@
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llrrrrrc}
+\toprule
+LLM-P & Refined by & Length & ROUGE-1 & ROUGE-2 & ROUGE-L & Co. Sim & LLM-J \\
+\midrule
+\multirow{4}{*}{gpt-5.6-sol} & kimi-k3 & 3481 & 0.687 & 0.268 & 0.264 & 0.771 &  \\
+ & qwen3.7-max & 3100 & 0.707 & 0.316 & 0.361 & 0.693 &  \\
+ & gemini-3.1-pro & 3251 & 0.718 & 0.296 & 0.322 & 0.650 &  \\
+ & claude-opus-4.8 & 3310 & 0.749 & 0.370 & 0.365 & 0.790 & X \\
+\multirow{4}{*}{kimi-k3} & gpt-5.6-sol & 4746 & 0.597 & 0.229 & 0.199 & 0.654 &  \\
+ & qwen3.7-max & 3284 & 0.641 & 0.265 & 0.317 & 0.576 & X \\
+ & gemini-3.1-pro & 2506 & 0.692 & 0.316 & 0.394 & 0.511 &  \\
+ & claude-opus-4.8 & 2928 & 0.617 & 0.219 & 0.281 & 0.537 &  \\
+\multirow{4}{*}{qwen3.7-max} & gpt-5.6-sol & 1582 & 0.555 & 0.228 & 0.227 & 0.641 & X \\
+ & kimi-k3 & 1430 & 0.648 & 0.349 & 0.346 & 0.664 &  \\
+ & gemini-3.1-pro & 1107 & 0.684 & 0.401 & 0.438 & 0.826 &  \\
+ & claude-opus-4.8 & 1130 & 0.682 & 0.378 & 0.408 & 0.684 &  \\
+\multirow{4}{*}{gemini-3.1-pro} & gpt-5.6-sol & 1320 & 0.572 & 0.228 & 0.255 & 0.661 & X \\
+ & kimi-k3 & 1186 & 0.642 & 0.320 & 0.322 & 0.650 &  \\
+ & qwen3.7-max & 1078 & 0.738 & 0.501 & 0.546 & 0.712 &  \\
+ & claude-opus-4.8 & 1041 & 0.622 & 0.322 & 0.352 & 0.613 &  \\
+\multirow{4}{*}{claude-opus-4.8} & gpt-5.6-sol & 2169 & 0.489 & 0.109 & 0.150 & 0.615 & X \\
+ & kimi-k3 & 1836 & 0.610 & 0.283 & 0.328 & 0.833 &  \\
+ & qwen3.7-max & 1755 & 0.630 & 0.304 & 0.353 & 0.782 &  \\
+ & gemini-3.1-pro & 1643 & 0.673 & 0.393 & 0.454 & 0.830 &  \\
+\bottomrule
+\end{tabular}
+\caption{Primary vs.\\ refined responses (MiniLM cosine).}
+\label{tab:primary-refined}
+\end{table}

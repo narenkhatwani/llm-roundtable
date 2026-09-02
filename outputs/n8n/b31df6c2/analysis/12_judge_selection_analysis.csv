@@ -1,0 +1,6 @@
+author,author_model,chosen_critic,chosen_critic_model,n_refinements,rank_ROUGE-1,rank_ROUGE-2,rank_ROUGE-L,rank_Co. Sim,rank_Length,metric_rank_1_wins
+LLM-1,gpt-5.6-sol,LLM-5,claude-opus-4.8,4,1,1,1,1,2,4
+LLM-2,kimi-k3,LLM-3,qwen3.7-max,4,2,2,2,2,2,0
+LLM-3,qwen3.7-max,LLM-1,gpt-5.6-sol,4,4,4,4,4,1,1
+LLM-4,gemini-3.1-pro,LLM-1,gpt-5.6-sol,4,4,4,4,2,1,1
+LLM-5,claude-opus-4.8,LLM-1,gpt-5.6-sol,4,4,4,4,4,1,1
